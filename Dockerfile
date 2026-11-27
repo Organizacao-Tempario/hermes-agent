@@ -21,6 +21,23 @@ RUN set -eu; \
     rm -rf "$tmp"; \
     /usr/local/bin/multica version
 
+# --- GitHub CLI -----------------------------------------------------------
+# Pinned + checksum-verified. Auth state lives on the volume
+# (/opt/data/.config/gh), so `gh auth login` as hermes survives redeploys.
+ARG GH_VERSION=2.106.0
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    base="https://github.com/cli/cli/releases/download/v${GH_VERSION}"; \
+    pkg="gh_${GH_VERSION}_linux_${arch}.tar.gz"; \
+    tmp="$(mktemp -d)"; \
+    curl -fsSL -o "$tmp/$pkg" "$base/$pkg"; \
+    curl -fsSL -o "$tmp/checksums.txt" "$base/gh_${GH_VERSION}_checksums.txt"; \
+    (cd "$tmp" && grep " ${pkg}\$" checksums.txt | sha256sum -c -); \
+    tar -xzf "$tmp/$pkg" -C "$tmp"; \
+    install -m 0755 -o root -g root "$tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /usr/local/bin/gh; \
+    rm -rf "$tmp"; \
+    /usr/local/bin/gh --version
+
 COPY s6-rc.d/multica-daemon /etc/s6-overlay/s6-rc.d/multica-daemon
 RUN chmod 0755 /etc/s6-overlay/s6-rc.d/multica-daemon/run \
                /etc/s6-overlay/s6-rc.d/multica-daemon/finish \

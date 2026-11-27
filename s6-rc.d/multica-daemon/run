@@ -43,7 +43,8 @@ home=/opt/data
 # agent runs must not inherit. The volume's ~/.profile (hermes-owned) is still
 # sourced so operator exports such as RAILWAY_TOKEN reach agent runs, as they
 # did when the daemon was started from a login shell. Explicit Railway values
-# for the MULTICA_* knobs below win over ~/.profile.
+# for the MULTICA_* knobs below win over ~/.profile. /usr/local/bin precedes
+# ~/.local/bin so the image's pinned multica and gh win over stale volume copies.
 if [ "$(id -u)" = 0 ]; then drop="s6-setuidgid $user"; else drop=""; fi
 as_hermes() {
     # shellcheck disable=SC2086
@@ -57,7 +58,7 @@ as_hermes() {
         RW_MULTICA_DAEMON_MAX_CONCURRENT_TASKS="${MULTICA_DAEMON_MAX_CONCURRENT_TASKS:-}" \
         /bin/sh -c '
             [ -f "$HOME/.profile" ] && . "$HOME/.profile"
-            export PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+            export PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
             for v in MULTICA_SERVER_URL MULTICA_APP_URL MULTICA_DAEMON_DEVICE_NAME \
                      MULTICA_AGENT_RUNTIME_NAME MULTICA_DAEMON_MAX_CONCURRENT_TASKS; do
                 eval "rw=\${RW_$v}; unset RW_$v"

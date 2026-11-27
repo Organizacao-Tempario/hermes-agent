@@ -10,7 +10,7 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
 
 | File | Role |
 | --- | --- |
-| `Dockerfile` | `FROM nousresearch/hermes-agent:latest`, installs the pinned Multica CLI to `/usr/local/bin/multica`, registers the `multica-daemon` s6 service, and sets `CMD` to `start.sh` |
+| `Dockerfile` | `FROM nousresearch/hermes-agent:latest`, installs the pinned Multica CLI (`MULTICA_VERSION`) and GitHub CLI (`GH_VERSION`) into `/usr/local/bin`, registers the `multica-daemon` s6 service, and sets `CMD` to `start.sh` |
 | `start.sh` | Runs `hermes gateway run` once (sets the gateway's durable "running" state on a fresh volume), then `exec sleep infinity` |
 | `s6-rc.d/multica-daemon/{run,finish,type,dependencies.d/base}` | Supervised Multica daemon running as `hermes` |
 | `railway.toml` | Dockerfile builder, `restartPolicyType = "always"` |
@@ -66,6 +66,16 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
   container. It competes with the supervised one for `daemon.lock`.
   Never kill `multica` processes by name. Check `multica daemon status --output json` for the PID first.
 
+## GitHub CLI (`gh`)
+
+- `/usr/local/bin/gh` is pinned by `ARG GH_VERSION` and checksum-verified. To upgrade, bump the version and redeploy.
+- In the daemon's PATH, `/usr/local/bin` comes before `/opt/data/.local/bin`, so the image's `gh` and `multica`
+  win over older copies left on the volume.
+- Auth lives on the volume (`/opt/data/.config/gh`). Set it up once as hermes with
+  `su -s /bin/sh hermes -c 'HOME=/opt/data gh auth login'`, or export `GH_TOKEN` in `/opt/data/.profile`.
+  Railway variables do **not** reach agent runs because the daemon starts with `env -i`.
+- To verify: `su -s /bin/sh hermes -c 'HOME=/opt/data gh auth status'`.
+
 ## Release checklist
 
 1. **Scope**: commit/PR, target Railway environment, and whether the upstream
@@ -74,7 +84,7 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
    `docker buildx imagetools inspect nousresearch/hermes-agent:latest` (or the
    registry API) so you can roll back to it.
 2. **Build**: Railway builds the Dockerfile. Locally, run `docker build .` and check that
-   the `multica version` line prints during the build.
+   the `multica version` and `gh --version` lines print during the build.
 3. **Config** (compare variable *names* only, never print values): `PORT`,
    `HERMES_DASHBOARD*`, `MULTICA_*`. Remember the committed `.evn` file is not
    loaded by Railway. Real values belong in Railway variables.
