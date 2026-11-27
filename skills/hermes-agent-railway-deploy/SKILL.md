@@ -1,6 +1,6 @@
 ---
 name: hermes-agent-railway-deploy
-description: Deploy, configure, verify and roll back the Tempario Hermes Agent service on Railway (repo Organizacao-Tempario/hermes-agent), including the s6-supervised Multica daemon that runs as the hermes user. Use for any release, config change, health check or incident on the Hermes Railway container.
+description: Deploy, configure, verify and roll back the Tempario Hermes Agent service on Railway (repo Organizacao-Tempario/hermes-agent), including the s6-supervised Multica daemon that runs as the hermes user and the always-latest multica/claude CLIs. Use for any release, config change, health check or incident on the Hermes Railway container.
 ---
 
 # Hermes Agent on Railway
@@ -10,7 +10,8 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
 
 | File | Role |
 | --- | --- |
-| `Dockerfile` | `FROM nousresearch/hermes-agent:latest`, installs the pinned Multica CLI (`MULTICA_VERSION`) and GitHub CLI (`GH_VERSION`) and Claude Code CLI (`CLAUDE_VERSION`) into `/usr/local/bin`, registers the `multica-daemon` s6 service, and sets `CMD` to `start.sh` |
+| `Dockerfile` | `FROM nousresearch/hermes-agent:latest`, installs the pinned GitHub CLI (`GH_VERSION`) into `/opt/hermes-railway/bin`, copies `bin/update-agent-clis`, registers the `multica-daemon` s6 service, and sets `CMD` to `start.sh`. multica and claude are **not** baked in |
+| `bin/update-agent-clis` | Runs as hermes on every service start and installs or upgrades multica and claude to their **latest** releases in `/opt/data/.local/bin` |
 | `start.sh` | Runs `hermes gateway run` once (sets the gateway's durable "running" state on a fresh volume), then `exec sleep infinity` |
 | `s6-rc.d/multica-daemon/{run,finish,type,dependencies.d/base}` | Supervised Multica daemon running as `hermes` |
 | `railway.toml` | Dockerfile builder, `restartPolicyType = "always"` |
@@ -36,12 +37,14 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
 
 ## Multica daemon (s6 service `multica-daemon`)
 
-- Binary: `/usr/local/bin/multica`, pinned by `ARG MULTICA_VERSION` in the
-  Dockerfile and checked against the release `checksums.txt`.
-  **Upgrade = bump `MULTICA_VERSION` and redeploy.** The service runs the daemon with
-  `--no-auto-update --no-auto-reload`. When the daemon updates itself outside
-  systemd, it spawns a detached successor and exits 0, so s6 would start a
-  second daemon. Do not turn these back on.
+- **Always latest, never pinned.** The binary is `/opt/data/.local/bin/multica` on the volume.
+  - On every service start, `update-agent-clis` resolves the latest GitHub release, verifies it against
+    `checksums.txt`, and swaps it in. A network failure keeps the existing copy.
+  - While running, the daemon's own auto-update and auto-reload stay **on** (the defaults).
+- **Self-update handoff.** Outside systemd, an updating daemon spawns a detached successor and exits 0.
+  s6 then re-runs `run`, which sees a healthy daemon in `multica daemon status`. It supervises that PID
+  (watches it and forwards TERM) instead of starting a second daemon. When the PID exits, s6 restarts
+  the service normally.
 - Runs as `hermes` with `HOME=/opt/data` and a clean environment (`env -i`).
   Railway secrets such as the dashboard password are **not** passed to agent runs.
   `/opt/data/.profile` is sourced, so operator exports (for example `RAILWAY_TOKEN`)
@@ -57,10 +60,11 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
     `MULTICA_DAEMON_MAX_CONCURRENT_TASKS`. These win over `.profile`.
   - Do **not** set `MULTICA_TOKEN` as a container variable. The CLI treats it as an
     auth override, and inside agent runs it must be the task-scoped token.
+- If multica can't be installed on first boot (no network), `run` retries every ~30s.
 - If the service is disabled or the volume has no login, `run` writes
   `/run/multica-daemon.down` and `finish` exits 125, so the slot stays down and
   does not restart in a loop. To recover by hand, run
-  `su -s /bin/sh hermes -c 'HOME=/opt/data /usr/local/bin/multica login'` and then
+  `su -s /bin/sh hermes -c 'HOME=/opt/data /opt/data/.local/bin/multica login'` and then
   `s6-svc -u /run/service/multica-daemon`.
 - Never start a second daemon by hand (`multica daemon start`) inside the
   container. It competes with the supervised one for `daemon.lock`.
@@ -68,9 +72,9 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
 
 ## GitHub CLI (`gh`)
 
-- `/usr/local/bin/gh` is pinned by `ARG GH_VERSION` and checksum-verified. To upgrade, bump the version and redeploy.
-- In the daemon's PATH, `/usr/local/bin` comes before `/opt/data/.local/bin`, so the image's `gh` and `multica`
-  win over older copies left on the volume.
+- `/opt/hermes-railway/bin/gh` is pinned by `ARG GH_VERSION` and checksum-verified. To upgrade, bump the version and redeploy.
+- Daemon PATH order: `/opt/hermes-railway/bin` (gh) → `/opt/data/.local/bin` (latest multica, claude) → `/opt/hermes/bin` → `/usr/local/bin`.
+  The image's gh therefore wins over the old gh symlink on the volume.
 - Auth lives on the volume (`/opt/data/.config/gh`). Set it up once as hermes with
   `su -s /bin/sh hermes -c 'HOME=/opt/data gh auth login'`, or export `GH_TOKEN` in `/opt/data/.profile`.
   Railway variables do **not** reach agent runs because the daemon starts with `env -i`.
@@ -78,13 +82,14 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
 
 ## Claude Code CLI (`claude`)
 
-- `/usr/local/bin/claude` is the native binary, pinned by `ARG CLAUDE_VERSION` and verified against the release
-  `manifest.json` SHA-256. The daemon finds it first on PATH. That makes it the `claude` agent runtime.
-- The daemon env sets `DISABLE_AUTOUPDATER=1`, so the binary doesn't write a second, self-updated copy to the volume.
-  To upgrade, bump `CLAUDE_VERSION` and redeploy.
+- **Always latest, never pinned.** The native install lives on the volume (`/opt/data/.local/bin/claude` →
+  `/opt/data/.local/share/claude/versions/<v>`).
+  - On every service start, `update-agent-clis` installs it with the official installer
+    (`https://claude.ai/install.sh`, `latest` channel) if it is missing, and otherwise runs `claude update`.
+  - Claude Code's own auto-updater stays on while it runs.
 - Auth and config live on the volume (`/opt/data/.claude`, `/opt/data/.claude.json`) and survive redeploys.
-  The older volume copy (`/opt/data/.local/bin/claude`) is now shadowed and can be removed later.
-- To verify: `su -s /bin/sh hermes -c 'HOME=/opt/data claude --version'`. The daemon status should list `claude` under `agents`.
+- To verify: `su -s /bin/sh hermes -c 'HOME=/opt/data /opt/data/.local/bin/claude --version'`.
+  The daemon status should list `claude` under `agents`.
 
 ## Release checklist
 
@@ -94,7 +99,8 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
    `docker buildx imagetools inspect nousresearch/hermes-agent:latest` (or the
    registry API) so you can roll back to it.
 2. **Build**: Railway builds the Dockerfile. Locally, run `docker build .` and check that
-   the `multica version`, `gh --version` and `claude --version` lines print during the build.
+   the `gh --version` line prints during the build. multica and claude are installed at container
+   start. Their versions appear in the logs as `[update-agent-clis] multica: … / claude: …`.
 3. **Config** (compare variable *names* only, never print values): `PORT`,
    `HERMES_DASHBOARD*`, `MULTICA_*`. Remember the committed `.evn` file is not
    loaded by Railway. Real values belong in Railway variables.
@@ -105,9 +111,10 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
    the linked branch. Use the `railway-environment-operations` skill for CLI specifics.
 6. **Post-deploy health** (collect evidence, do not assume it):
    - Railway deploy status is `SUCCESS` and the container does not restart in a loop (check logs).
-   - Logs show `[multica-daemon] starting multica <version> as hermes`.
+   - Logs show `[update-agent-clis] multica: …` and `claude: …` lines (expect the latest releases),
+     then `[multica-daemon] starting multica <version> as hermes`.
    - In the container: `s6-svstat /run/service/multica-daemon`, which should be up with a growing uptime.
-   - `su -s /bin/sh hermes -c 'HOME=/opt/data /usr/local/bin/multica daemon status --output json'`
+   - `su -s /bin/sh hermes -c 'HOME=/opt/data /opt/data/.local/bin/multica daemon status --output json'`
      should show `status: running`, the expected `cli_version`, and the workspaces/runtimes.
    - `ps -o user,args -C multica` shows exactly one daemon, owned by `hermes`.
    - The runtime shows online in Multica (`multica runtime list --output json`).
@@ -120,7 +127,10 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
   commit and push. The volume is untouched, so Multica login and Hermes state stay.
 - Upstream Hermes regression: pin the base image by digest
   (`FROM nousresearch/hermes-agent@sha256:<previous>`) and redeploy.
-- Multica regression: set `MULTICA_VERSION` back to the previous version and redeploy.
-  As a stopgap, set `MULTICA_DAEMON=0` to keep Hermes up without the runtime.
+- Bad multica/claude release: these always track latest, so a redeploy does **not** roll them back.
+  - Stopgap: set `MULTICA_DAEMON=0` to keep Hermes up without the runtime.
+  - Or replace `/opt/data/.local/bin/multica` with the previous release tarball as hermes and restart the
+    service. Auto-update will move it forward again once a fixed release ships.
+  - For claude, run `claude install <version>` as hermes.
 - Data impact: none from this repo. A newer Hermes may have migrated `/opt/data`,
   so roll back across Hermes versions only together with a volume backup.

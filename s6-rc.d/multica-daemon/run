@@ -3,10 +3,17 @@
 # Multica agent-runtime daemon, supervised by s6 and run as `hermes`.
 #
 # State lives on the data volume (HOME=/opt/data → /opt/data/.multica), so the
-# login, daemon id and workspaces survive redeploys. The binary is the pinned
-# image copy (/usr/local/bin/multica); auto-update and auto-reload are forced
-# off because the daemon's update handoff spawns a detached successor and
-# exits 0, which s6 would answer by starting a second daemon.
+# login, daemon id and workspaces survive redeploys.
+#
+# Always-latest CLIs: before the daemon starts, update-agent-clis installs or
+# upgrades multica and claude to their latest releases in ~/.local/bin (on the
+# volume). While running, the daemon auto-updates multica and Claude Code's
+# auto-updater keeps claude current.
+#
+# Self-update handoff: when the daemon updates itself it spawns a detached
+# successor and exits 0. s6 then re-runs this script; if a healthy daemon is
+# already running we supervise it (watch its PID, forward TERM) instead of
+# starting a second one. When it exits, s6 restarts us and we start fresh.
 #
 # Env (Railway service variables):
 #   MULTICA_DAEMON            0/false/no disables the service (default: on)
@@ -33,18 +40,18 @@ case "${MULTICA_DAEMON:-1}" in
     0|false|FALSE|False|no|NO|No|off|OFF) down "disabled via MULTICA_DAEMON" ;;
 esac
 
-bin=/usr/local/bin/multica
 user=hermes
 home=/opt/data
-[ -x "$bin" ] || down "missing $bin"
+bin="$home/.local/bin/multica"
+updater=/opt/hermes-railway/update-agent-clis
 
 # Everything below runs as hermes with a minimal environment (env -i): the
 # container env carries dashboard credentials and other Railway secrets that
 # agent runs must not inherit. The volume's ~/.profile (hermes-owned) is still
 # sourced so operator exports such as RAILWAY_TOKEN reach agent runs, as they
 # did when the daemon was started from a login shell. Explicit Railway values
-# for the MULTICA_* knobs below win over ~/.profile. /usr/local/bin precedes
-# ~/.local/bin so the image's pinned multica, gh and claude win over stale volume copies.
+# for the MULTICA_* knobs below win over ~/.profile. ~/.local/bin (latest
+# multica + claude) comes first, after /opt/hermes-railway/bin (image gh).
 if [ "$(id -u)" = 0 ]; then drop="s6-setuidgid $user"; else drop=""; fi
 as_hermes() {
     # shellcheck disable=SC2086
@@ -58,19 +65,53 @@ as_hermes() {
         RW_MULTICA_DAEMON_MAX_CONCURRENT_TASKS="${MULTICA_DAEMON_MAX_CONCURRENT_TASKS:-}" \
         /bin/sh -c '
             [ -f "$HOME/.profile" ] && . "$HOME/.profile"
-            export PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+            export PATH="/opt/hermes-railway/bin:$HOME/.local/bin:/opt/hermes/bin:/opt/hermes/.venv/bin:/usr/local/bin:$PATH"
             for v in MULTICA_SERVER_URL MULTICA_APP_URL MULTICA_DAEMON_DEVICE_NAME \
                      MULTICA_AGENT_RUNTIME_NAME MULTICA_DAEMON_MAX_CONCURRENT_TASKS; do
                 eval "rw=\${RW_$v}; unset RW_$v"
                 [ -n "$rw" ] && export "$v=$rw"
             done
             unset rw v
-            # Claude Code is pinned in the image (CLAUDE_VERSION); keep its
-            # self-updater from writing a second copy onto the volume.
-            export DISABLE_AUTOUPDATER=1
             exec "$@"
         ' as_hermes "$@"
 }
+
+# A daemon already running (successor of a self-update handoff, or one
+# started by hand): supervise it rather than racing it for daemon.lock.
+running_pid() {
+    [ -x "$bin" ] || return 0
+    as_hermes "$bin" daemon status --output json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if d.get("status") == "running" and d.get("pid"):
+    print(d["pid"])
+' 2>/dev/null
+}
+pid="$(running_pid)"
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "[multica-daemon] daemon already running (pid $pid, e.g. after a self-update); supervising it" >&2
+    trap 'kill -TERM "$pid" 2>/dev/null; exit 0' TERM INT
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 15 &
+        wait $!
+    done
+    echo "[multica-daemon] pid $pid exited; restarting" >&2
+    exit 0
+fi
+
+# Install/upgrade multica + claude to latest (non-fatal on network errors).
+if [ -x "$updater" ]; then
+    as_hermes "$updater" || echo "[multica-daemon] update-agent-clis failed; continuing" >&2
+fi
+if [ ! -x "$bin" ]; then
+    # Transient (e.g. no network yet): retry via s6 with a backoff, not "down".
+    echo "[multica-daemon] multica CLI missing at $bin and could not be installed; retrying in 30s" >&2
+    sleep 30
+    exit 1
+fi
 
 cfg="$home/.multica/config.json"
 if ! grep -q '"token"[[:space:]]*:[[:space:]]*"[^"]' "$cfg" 2>/dev/null; then
@@ -90,6 +131,7 @@ unset MULTICA_BOOTSTRAP_TOKEN
 cd "$home" || down "cannot cd to $home"
 echo "[multica-daemon] starting $("$bin" version 2>/dev/null | head -n1) as $user" >&2
 # exec so s6 supervises the daemon itself; hermes' env -i means the bootstrap
-# token never reaches it.
+# token never reaches it. Auto-update/auto-reload stay on (the default) so
+# multica keeps following the latest release; see the handoff note above.
 drop="exec $drop"
-as_hermes "$bin" daemon start --foreground --no-auto-update --no-auto-reload
+as_hermes "$bin" daemon start --foreground
