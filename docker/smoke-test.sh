@@ -25,6 +25,9 @@ docker logs "$name" 2>&1 | grep -q 'not logged in' || fail "expected 'not logged
 sleep 15
 [ "$(docker inspect -f '{{.State.Running}}' "$name")" = true ] || fail "container exited after boot"
 
+# 2b. start.sh ran the boot-time plugin update step (empty volume: a no-op).
+docker logs "$name" 2>&1 | grep -q '\[start\] plugins: checking for updates' || fail "boot plugin update step did not run"
+
 # 3. Agent CLIs on the volume, owned by hermes; toolbox on PATH.
 docker exec -u hermes -e HOME=/opt/data "$name" /opt/data/.local/bin/multica version || fail "multica missing"
 docker exec -u hermes -e HOME=/opt/data "$name" /opt/data/.local/bin/claude --version || fail "claude missing"

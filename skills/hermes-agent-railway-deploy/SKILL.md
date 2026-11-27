@@ -96,6 +96,20 @@ tool release changes.
 - To verify: `su -s /bin/sh hermes -c 'HOME=/opt/data /opt/data/.local/bin/claude --version'`.
   The daemon status should list `claude` under `agents`.
 
+## Plugins (boot-time update)
+
+- Plugins live on the volume (`/opt/data/plugins`, per profile under `/opt/data/profiles/<name>/plugins`),
+  so the image cannot update them at build time.
+- `start.sh` runs `hermes plugins check-updates` then `hermes plugins update --yes` on every boot,
+  before the gateway starts. It is bounded by `HERMES_PLUGINS_UPDATE_TIMEOUT` (default 300 s) and is
+  never fatal. Opt out with `HERMES_PLUGINS_UPDATE_ON_BOOT=0`.
+- No `--force`: a plugin whose security scan returns a caution verdict is skipped and logged.
+- Between deploys the gateway's own auto-update (`hermes plugins auto-update`, every 24 h) keeps them current.
+- Self-cloned plugins (status `self-cloned; run hermes plugins adopt first`) are not updated until adopted.
+- Do not install the same plugin in two profiles: the shared-venv sync puts every profile's plugin
+  sources into one uv workspace and fails with `Two workspace members are both named ...` (TEM-159).
+- Verify: `hermes pm status` shows the latest sync receipt with `"outcome": "ok"`.
+
 ## Release checklist
 
 1. **Scope**: commit/PR and target Railway environment. A base-image bump arrives as a Renovate PR
@@ -115,6 +129,8 @@ tool release changes.
    - Railway deploy status is `SUCCESS` and the container does not restart in a loop (check logs).
    - Logs show `[update-agent-clis] multica: …` and `claude: …` lines (expect the latest releases),
      then `[multica-daemon] starting multica <version> as hermes`.
+   - Logs show `[start] plugins: checking for updates` with no `update failed` line, and
+     `hermes pm status` reports `"outcome": "ok"`.
    - In the container: `s6-svstat /run/service/multica-daemon`, which should be up with a growing uptime.
    - `su -s /bin/sh hermes -c 'HOME=/opt/data /opt/data/.local/bin/multica daemon status --output json'`
      should show `status: running`, the expected `cli_version`, and the workspaces/runtimes.
@@ -127,6 +143,9 @@ tool release changes.
 
 - Code/config: in Railway, redeploy the previous successful deployment, or revert the
   commit and push. The volume is untouched, so Multica login and Hermes state stay.
+- Bad plugin update: a redeploy does not roll it back (plugins are on the volume). Set
+  `HERMES_PLUGINS_UPDATE_ON_BOOT=0`, then reinstall the previous version (`hermes plugins remove <name>`,
+  `hermes plugins install <source> --ref <40-char-sha>`) and restart the gateway.
 - Upstream Hermes regression: revert the Renovate digest bump, so `FROM` points at the previous
   digest again, and redeploy.
 - Bad multica/claude release: these always track latest, so a redeploy does **not** roll them back.
