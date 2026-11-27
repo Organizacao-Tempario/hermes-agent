@@ -1,0 +1,91 @@
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# Multica agent-runtime daemon, supervised by s6 and run as `hermes`.
+#
+# State lives on the data volume (HOME=/opt/data → /opt/data/.multica), so the
+# login, daemon id and workspaces survive redeploys. The binary is the pinned
+# image copy (/usr/local/bin/multica); auto-update and auto-reload are forced
+# off because the daemon's update handoff spawns a detached successor and
+# exits 0, which s6 would answer by starting a second daemon.
+#
+# Env (Railway service variables):
+#   MULTICA_DAEMON            0/false/no disables the service (default: on)
+#   MULTICA_BOOTSTRAP_TOKEN   mul_ PAT, used ONCE to log in on a fresh volume
+#   MULTICA_SERVER_URL        backend URL for that first login
+#   MULTICA_APP_URL           frontend URL for that first login (optional)
+#   MULTICA_DAEMON_DEVICE_NAME, MULTICA_AGENT_RUNTIME_NAME,
+#   MULTICA_DAEMON_MAX_CONCURRENT_TASKS   passed through to the daemon
+#
+# If the service cannot run (disabled / not logged in) it writes a marker and
+# exits 0; ./finish then returns 125 so s6 leaves the slot down instead of
+# restart-looping.
+
+marker=/run/multica-daemon.down
+rm -f "$marker"
+
+down() {
+    echo "[multica-daemon] $*" >&2
+    : > "$marker"
+    exit 0
+}
+
+case "${MULTICA_DAEMON:-1}" in
+    0|false|FALSE|False|no|NO|No|off|OFF) down "disabled via MULTICA_DAEMON" ;;
+esac
+
+bin=/usr/local/bin/multica
+user=hermes
+home=/opt/data
+[ -x "$bin" ] || down "missing $bin"
+
+# Everything below runs as hermes with a minimal environment (env -i): the
+# container env carries dashboard credentials and other Railway secrets that
+# agent runs must not inherit. The volume's ~/.profile (hermes-owned) is still
+# sourced so operator exports such as RAILWAY_TOKEN reach agent runs, as they
+# did when the daemon was started from a login shell. Explicit Railway values
+# for the MULTICA_* knobs below win over ~/.profile.
+if [ "$(id -u)" = 0 ]; then drop="s6-setuidgid $user"; else drop=""; fi
+as_hermes() {
+    # shellcheck disable=SC2086
+    $drop env -i HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/sh \
+        LANG="${LANG:-C.UTF-8}" PATH=/usr/bin:/bin \
+        HERMES_HOME="${HERMES_HOME:-$home}" \
+        RW_MULTICA_SERVER_URL="${MULTICA_SERVER_URL:-}" \
+        RW_MULTICA_APP_URL="${MULTICA_APP_URL:-}" \
+        RW_MULTICA_DAEMON_DEVICE_NAME="${MULTICA_DAEMON_DEVICE_NAME:-}" \
+        RW_MULTICA_AGENT_RUNTIME_NAME="${MULTICA_AGENT_RUNTIME_NAME:-}" \
+        RW_MULTICA_DAEMON_MAX_CONCURRENT_TASKS="${MULTICA_DAEMON_MAX_CONCURRENT_TASKS:-}" \
+        /bin/sh -c '
+            [ -f "$HOME/.profile" ] && . "$HOME/.profile"
+            export PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+            for v in MULTICA_SERVER_URL MULTICA_APP_URL MULTICA_DAEMON_DEVICE_NAME \
+                     MULTICA_AGENT_RUNTIME_NAME MULTICA_DAEMON_MAX_CONCURRENT_TASKS; do
+                eval "rw=\${RW_$v}; unset RW_$v"
+                [ -n "$rw" ] && export "$v=$rw"
+            done
+            unset rw v
+            exec "$@"
+        ' as_hermes "$@"
+}
+
+cfg="$home/.multica/config.json"
+if ! grep -q '"token"[[:space:]]*:[[:space:]]*"[^"]' "$cfg" 2>/dev/null; then
+    [ -n "${MULTICA_BOOTSTRAP_TOKEN:-}" ] || down "not logged in ($cfg has no token) and MULTICA_BOOTSTRAP_TOKEN is unset; set it, or run 'multica login' as hermes and then 's6-svc -u /run/service/multica-daemon'"
+    [ -n "${MULTICA_SERVER_URL:-}" ] || down "MULTICA_SERVER_URL is required for the first login"
+    echo "[multica-daemon] first boot on this volume: logging in to $MULTICA_SERVER_URL" >&2
+    as_hermes "$bin" config set server_url "$MULTICA_SERVER_URL" >&2 || down "config set server_url failed"
+    if [ -n "${MULTICA_APP_URL:-}" ]; then
+        as_hermes "$bin" config set app_url "$MULTICA_APP_URL" >&2 || down "config set app_url failed"
+    fi
+    # Token goes through stdin (`--token` with no value prompts), never argv.
+    printf '%s\n' "$MULTICA_BOOTSTRAP_TOKEN" | as_hermes "$bin" login --token >&2 \
+        || down "login failed; check MULTICA_BOOTSTRAP_TOKEN / MULTICA_SERVER_URL"
+fi
+unset MULTICA_BOOTSTRAP_TOKEN
+
+cd "$home" || down "cannot cd to $home"
+echo "[multica-daemon] starting $("$bin" version 2>/dev/null | head -n1) as $user" >&2
+# exec so s6 supervises the daemon itself; hermes' env -i means the bootstrap
+# token never reaches it.
+drop="exec $drop"
+as_hermes "$bin" daemon start --foreground --no-auto-update --no-auto-reload
