@@ -44,7 +44,7 @@ home=/opt/data
 # sourced so operator exports such as RAILWAY_TOKEN reach agent runs, as they
 # did when the daemon was started from a login shell. Explicit Railway values
 # for the MULTICA_* knobs below win over ~/.profile. /usr/local/bin precedes
-# ~/.local/bin so the image's pinned multica and gh win over stale volume copies.
+# ~/.local/bin so the image's pinned multica, gh and claude win over stale volume copies.
 if [ "$(id -u)" = 0 ]; then drop="s6-setuidgid $user"; else drop=""; fi
 as_hermes() {
     # shellcheck disable=SC2086
@@ -65,6 +65,9 @@ as_hermes() {
                 [ -n "$rw" ] && export "$v=$rw"
             done
             unset rw v
+            # Claude Code is pinned in the image (CLAUDE_VERSION); keep its
+            # self-updater from writing a second copy onto the volume.
+            export DISABLE_AUTOUPDATER=1
             exec "$@"
         ' as_hermes "$@"
 }

@@ -10,7 +10,7 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
 
 | File | Role |
 | --- | --- |
-| `Dockerfile` | `FROM nousresearch/hermes-agent:latest`, installs the pinned Multica CLI (`MULTICA_VERSION`) and GitHub CLI (`GH_VERSION`) into `/usr/local/bin`, registers the `multica-daemon` s6 service, and sets `CMD` to `start.sh` |
+| `Dockerfile` | `FROM nousresearch/hermes-agent:latest`, installs the pinned Multica CLI (`MULTICA_VERSION`) and GitHub CLI (`GH_VERSION`) and Claude Code CLI (`CLAUDE_VERSION`) into `/usr/local/bin`, registers the `multica-daemon` s6 service, and sets `CMD` to `start.sh` |
 | `start.sh` | Runs `hermes gateway run` once (sets the gateway's durable "running" state on a fresh volume), then `exec sleep infinity` |
 | `s6-rc.d/multica-daemon/{run,finish,type,dependencies.d/base}` | Supervised Multica daemon running as `hermes` |
 | `railway.toml` | Dockerfile builder, `restartPolicyType = "always"` |
@@ -76,6 +76,16 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
   Railway variables do **not** reach agent runs because the daemon starts with `env -i`.
 - To verify: `su -s /bin/sh hermes -c 'HOME=/opt/data gh auth status'`.
 
+## Claude Code CLI (`claude`)
+
+- `/usr/local/bin/claude` is the native binary, pinned by `ARG CLAUDE_VERSION` and verified against the release
+  `manifest.json` SHA-256. The daemon finds it first on PATH. That makes it the `claude` agent runtime.
+- The daemon env sets `DISABLE_AUTOUPDATER=1`, so the binary doesn't write a second, self-updated copy to the volume.
+  To upgrade, bump `CLAUDE_VERSION` and redeploy.
+- Auth and config live on the volume (`/opt/data/.claude`, `/opt/data/.claude.json`) and survive redeploys.
+  The older volume copy (`/opt/data/.local/bin/claude`) is now shadowed and can be removed later.
+- To verify: `su -s /bin/sh hermes -c 'HOME=/opt/data claude --version'`. The daemon status should list `claude` under `agents`.
+
 ## Release checklist
 
 1. **Scope**: commit/PR, target Railway environment, and whether the upstream
@@ -84,7 +94,7 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
    `docker buildx imagetools inspect nousresearch/hermes-agent:latest` (or the
    registry API) so you can roll back to it.
 2. **Build**: Railway builds the Dockerfile. Locally, run `docker build .` and check that
-   the `multica version` and `gh --version` lines print during the build.
+   the `multica version`, `gh --version` and `claude --version` lines print during the build.
 3. **Config** (compare variable *names* only, never print values): `PORT`,
    `HERMES_DASHBOARD*`, `MULTICA_*`. Remember the committed `.evn` file is not
    loaded by Railway. Real values belong in Railway variables.

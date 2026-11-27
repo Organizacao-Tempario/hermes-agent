@@ -38,6 +38,26 @@ RUN set -eu; \
     rm -rf "$tmp"; \
     /usr/local/bin/gh --version
 
+# --- Claude Code CLI -------------------------------------------------------
+# Native binary, pinned and verified against the release manifest. Agent
+# runs launched by the daemon use this copy (/usr/local/bin precedes the
+# volume's ~/.local/bin); its auto-updater is disabled in the daemon env, so
+# upgrade by bumping CLAUDE_VERSION. Auth/config stay on the volume
+# (/opt/data/.claude, /opt/data/.claude.json).
+ARG CLAUDE_VERSION=2.1.331
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in amd64) plat=linux-x64 ;; arm64) plat=linux-arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; \
+    base="https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}"; \
+    tmp="$(mktemp -d)"; \
+    curl -fsSL -o "$tmp/manifest.json" "$base/manifest.json"; \
+    curl -fsSL -o "$tmp/claude" "$base/$plat/claude"; \
+    sum="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["platforms"][sys.argv[2]]["checksum"])' "$tmp/manifest.json" "$plat")"; \
+    echo "$sum  $tmp/claude" | sha256sum -c -; \
+    install -m 0755 -o root -g root "$tmp/claude" /usr/local/bin/claude; \
+    rm -rf "$tmp"; \
+    /usr/local/bin/claude --version
+
 COPY s6-rc.d/multica-daemon /etc/s6-overlay/s6-rc.d/multica-daemon
 RUN chmod 0755 /etc/s6-overlay/s6-rc.d/multica-daemon/run \
                /etc/s6-overlay/s6-rc.d/multica-daemon/finish \
