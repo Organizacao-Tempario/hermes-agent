@@ -1,0 +1,11 @@
+#!/bin/sh
+# shellcheck shell=sh
+# Companion to ./run. 125 = "permanent failure, do not restart" for s6-supervise:
+# used when run decided the daemon cannot start (disabled or not logged in).
+# Otherwise back off briefly and let s6 restart the daemon after a crash.
+# Args: $1=run exit code, $2=signal. See servicedir(7).
+if [ -e /run/multica-daemon.down ]; then
+    exit 125
+fi
+sleep 2
+exit 0
