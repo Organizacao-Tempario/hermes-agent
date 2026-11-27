@@ -1,0 +1,75 @@
+#!/bin/sh
+# shellcheck shell=sh
+# Install or upgrade the Multica CLI and Claude Code CLI to their LATEST
+# releases in the hermes user's ~/.local/bin (on the /opt/data volume).
+#
+# Runs as hermes on every start of the multica-daemon s6 service, before the
+# daemon starts. Both tools then keep themselves current while running:
+# the daemon auto-updates multica in place, and Claude Code's auto-updater
+# updates claude. Failures are logged but never fatal: an existing copy keeps
+# working if GitHub or the Claude download service is unreachable.
+set -u
+
+bindir="$HOME/.local/bin"
+mkdir -p "$bindir"
+log() { echo "[update-agent-clis] $*" >&2; }
+
+case "$(uname -m)" in
+    x86_64|amd64) gh_arch=amd64 ;;
+    aarch64|arm64) gh_arch=arm64 ;;
+    *) log "unsupported arch $(uname -m)"; exit 0 ;;
+esac
+
+# --- multica: latest GitHub release, checksum-verified --------------------
+update_multica() {
+    latest="$(curl -fsSI --max-time 30 https://github.com/multica-ai/multica/releases/latest 2>/dev/null \
+        | sed -n 's#^[Ll]ocation:.*/tag/\(v[^[:space:]]*\).*#\1#p' | tr -d '\r')"
+    if [ -z "$latest" ]; then
+        log "multica: could not resolve latest release; keeping current"
+        return 0
+    fi
+    current="$("$bindir/multica" version 2>/dev/null | awk 'NR==1 {print $2}')"
+    if [ "v$current" = "$latest" ]; then
+        log "multica: $current is the latest"
+        return 0
+    fi
+    ver="${latest#v}"
+    base="https://github.com/multica-ai/multica/releases/download/$latest"
+    pkg="multica-cli-$ver-linux-$gh_arch.tar.gz"
+    tmp="$(mktemp -d)" || return 0
+    if curl -fsSL --max-time 300 -o "$tmp/$pkg" "$base/$pkg" \
+        && curl -fsSL --max-time 60 -o "$tmp/checksums.txt" "$base/checksums.txt" \
+        && (cd "$tmp" && grep " $pkg\$" checksums.txt | sha256sum -c - >/dev/null) \
+        && tar -xzf "$tmp/$pkg" -C "$tmp" multica \
+        && chmod 0755 "$tmp/multica" \
+        && mv -f "$tmp/multica" "$bindir/multica"; then
+        log "multica: ${current:-none} -> $ver"
+    else
+        log "multica: install of $ver failed; keeping ${current:-none}"
+    fi
+    rm -rf "$tmp"
+}
+
+# --- claude: official native installer / self-update (latest channel) -----
+update_claude() {
+    if [ -x "$bindir/claude" ]; then
+        before="$("$bindir/claude" --version 2>/dev/null | awk '{print $1}')"
+        timeout 600 "$bindir/claude" update >/dev/null 2>&1 \
+            || log "claude: 'claude update' failed; keeping $before"
+    else
+        before=none
+        script="$(mktemp)" || return 0
+        if curl -fsSL --max-time 60 -o "$script" https://claude.ai/install.sh; then
+            timeout 900 bash "$script" latest >/dev/null 2>&1 || log "claude: installer failed"
+        else
+            log "claude: could not download installer"
+        fi
+        rm -f "$script"
+    fi
+    after="$("$bindir/claude" --version 2>/dev/null | awk '{print $1}')"
+    log "claude: $before -> ${after:-none}"
+}
+
+update_multica
+update_claude
+exit 0
