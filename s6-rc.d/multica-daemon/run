@@ -54,7 +54,8 @@ updater=/opt/hermes-railway/update-agent-clis
 # multica + claude) comes first, after /opt/hermes-railway/bin (image gh).
 if [ "$(id -u)" = 0 ]; then drop="s6-setuidgid $user"; else drop=""; fi
 as_hermes() {
-    # shellcheck disable=SC2086
+    # SC2016: the inner script is meant to expand in the hermes shell.
+    # shellcheck disable=SC2086,SC2016
     $drop env -i HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/sh \
         LANG="${LANG:-C.UTF-8}" PATH=/usr/bin:/bin \
         HERMES_HOME="${HERMES_HOME:-$home}" \
@@ -72,6 +73,9 @@ as_hermes() {
                 [ -n "$rw" ] && export "$v=$rw"
             done
             unset rw v
+            # The Nx background daemon outlives agent runs and piles up against
+            # the container pids limit; agents run Nx in-process instead.
+            export NX_DAEMON="${NX_DAEMON:-false}"
             exec "$@"
         ' as_hermes "$@"
 }

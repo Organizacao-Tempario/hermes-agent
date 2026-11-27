@@ -1,4 +1,13 @@
-FROM nousresearch/hermes-agent:latest
+# Base image pinned by digest (tag kept for readability); Renovate opens a PR
+# when upstream `latest` moves, so Hermes upgrades are reviewed and CI-tested
+# instead of arriving silently on any rebuild. Roll back = previous digest.
+FROM nousresearch/hermes-agent:latest@sha256:ef0650d523ee1b5ab32c779acabc446d9936869a9932591553688a62bcf0c42f
+
+# --- Agent toolbox ----------------------------------------------------------
+# jq, shellcheck, psql, redis-cli, sqlite3 (apt) + yq, hadolint, gitleaks,
+# trivy, uv, railway (pinned, checksum-verified releases). See the script.
+COPY docker/install-tools.sh /tmp/install-tools.sh
+RUN sh /tmp/install-tools.sh /usr/local/bin && rm /tmp/install-tools.sh
 
 # --- GitHub CLI -----------------------------------------------------------
 # Pinned + checksum-verified. Auth state lives on the volume
@@ -6,7 +15,11 @@ FROM nousresearch/hermes-agent:latest
 # Installed to /opt/hermes-railway/bin, which the daemon puts first on PATH so
 # it wins over the older gh symlink on the volume's ~/.local/bin.
 ARG TARGETARCH
+# renovate: datasource=github-releases depName=cli/cli extractVersion=^v(?<version>.*)$
 ARG GH_VERSION=2.106.0
+# DL4006: an empty grep result makes `sha256sum -c` fail anyway. DL3003: the
+# cd is scoped to a subshell.
+# hadolint ignore=DL3003,DL4006
 RUN set -eu; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     base="https://github.com/cli/cli/releases/download/v${GH_VERSION}"; \
