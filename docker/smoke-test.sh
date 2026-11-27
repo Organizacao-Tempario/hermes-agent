@@ -33,8 +33,9 @@ for t in /opt/hermes-railway/bin/gh jq yq shellcheck hadolint gitleaks trivy uv 
 done
 [ "$(docker exec "$name" stat -c %U /opt/data/.local/bin/multica)" = hermes ] || fail "multica not owned by hermes"
 
-# 4. The s6 slot exists and is down (not crash-looping).
-docker exec "$name" s6-svstat /run/service/multica-daemon || fail "no s6 slot"
-docker exec "$name" s6-svstat /run/service/multica-daemon | grep -q '^down' || fail "slot should be down without a login"
+# 4. The s6 slot exists and is down (not crash-looping). s6 tools live in
+#    /command, which is not on the docker exec PATH.
+docker exec "$name" /command/s6-svstat /run/service/multica-daemon || fail "no s6 slot"
+docker exec "$name" /command/s6-svstat /run/service/multica-daemon | grep -q '^down' || fail "slot should be down without a login"
 
 echo "SMOKE OK"
