@@ -1,0 +1,4 @@
+# Local env files: real values belong in Railway service variables.
+.env
+.env.*
+.evn

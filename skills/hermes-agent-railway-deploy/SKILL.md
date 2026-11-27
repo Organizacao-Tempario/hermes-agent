@@ -6,11 +6,15 @@ description: Deploy, configure, verify and roll back the Tempario Hermes Agent s
 # Hermes Agent on Railway
 
 Repo: `https://github.com/Organizacao-Tempario/hermes-agent`. It is a thin
-wrapper over the upstream image `nousresearch/hermes-agent:latest`.
+wrapper over the upstream image `nousresearch/hermes-agent`, **pinned by digest**.
+Renovate (`renovate.json`) opens a PR when upstream `latest` moves, and when any pinned
+tool release changes.
 
 | File | Role |
 | --- | --- |
 | `Dockerfile` | `FROM nousresearch/hermes-agent:latest`, installs the pinned GitHub CLI (`GH_VERSION`) into `/opt/hermes-railway/bin`, copies `bin/update-agent-clis`, registers the `multica-daemon` s6 service, and sets `CMD` to `start.sh`. multica and claude are **not** baked in |
+| `docker/install-tools.sh` | Build-time agent toolbox. From apt: `jq`, `shellcheck`, `psql`, `redis-cli`, `sqlite3`. Pinned and checksum-verified: `yq`, `hadolint`, `gitleaks`, `trivy`, `uv`/`uvx`, `railway`. `railway` has no upstream checksum |
+| `docker/smoke-test.sh`, `.github/workflows/ci.yml` | CI: shellcheck, hadolint and gitleaks, then image build, a boot smoke test on a fresh volume, and a Trivy report |
 | `bin/update-agent-clis` | Runs as hermes on every service start and installs or upgrades multica and claude to their **latest** releases in `/opt/data/.local/bin` |
 | `start.sh` | Runs `hermes gateway run` once (sets the gateway's durable "running" state on a fresh volume), then `exec sleep infinity` |
 | `s6-rc.d/multica-daemon/{run,finish,type,dependencies.d/base}` | Supervised Multica daemon running as `hermes` |
@@ -45,7 +49,8 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
   s6 then re-runs `run`, which sees a healthy daemon in `multica daemon status`. It supervises that PID
   (watches it and forwards TERM) instead of starting a second daemon. When the PID exits, s6 restarts
   the service normally.
-- Runs as `hermes` with `HOME=/opt/data` and a clean environment (`env -i`).
+- Runs as `hermes` with `HOME=/opt/data` and a clean environment (`env -i`). `NX_DAEMON=false` is set by default,
+  because leaked Nx daemons count against the container's 1000-process limit.
   Railway secrets such as the dashboard password are **not** passed to agent runs.
   `/opt/data/.profile` is sourced, so operator exports (for example `RAILWAY_TOKEN`)
   still reach agent runs.
@@ -93,12 +98,9 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
 
 ## Release checklist
 
-1. **Scope**: commit/PR, target Railway environment, and whether the upstream
-   `latest` tag moved. `latest` is unpinned, so a rebuild can pull a new Hermes.
-   Record its digest with
-   `docker buildx imagetools inspect nousresearch/hermes-agent:latest` (or the
-   registry API) so you can roll back to it.
-2. **Build**: Railway builds the Dockerfile. Locally, run `docker build .` and check that
+1. **Scope**: commit/PR and target Railway environment. A base-image bump arrives as a Renovate PR
+   that changes the digest in `FROM`. Note the old digest; it is the rollback target.
+2. **Build**: CI (`ci` workflow) must be green: lint, build and the boot smoke test. Railway builds the Dockerfile. Locally, run `docker build .` and check that
    the `gh --version` line prints during the build. multica and claude are installed at container
    start. Their versions appear in the logs as `[update-agent-clis] multica: … / claude: …`.
 3. **Config** (compare variable *names* only, never print values): `PORT`,
@@ -125,8 +127,8 @@ wrapper over the upstream image `nousresearch/hermes-agent:latest`.
 
 - Code/config: in Railway, redeploy the previous successful deployment, or revert the
   commit and push. The volume is untouched, so Multica login and Hermes state stay.
-- Upstream Hermes regression: pin the base image by digest
-  (`FROM nousresearch/hermes-agent@sha256:<previous>`) and redeploy.
+- Upstream Hermes regression: revert the Renovate digest bump, so `FROM` points at the previous
+  digest again, and redeploy.
 - Bad multica/claude release: these always track latest, so a redeploy does **not** roll them back.
   - Stopgap: set `MULTICA_DAEMON=0` to keep Hermes up without the runtime.
   - Or replace `/opt/data/.local/bin/multica` with the previous release tarball as hermes and restart the

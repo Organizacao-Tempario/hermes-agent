@@ -1,0 +1,37 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "dependencyDashboard": true,
+  "packageRules": [
+    {
+      "description": "Hermes base image: one reviewed PR per upstream digest change, never automerged.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "nousresearch/hermes-agent"
+      ],
+      "pinDigests": true,
+      "automerge": false,
+      "labels": [
+        "base-image"
+      ]
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Pinned release binaries in Dockerfile ARGs and docker/install-tools.sh",
+      "managerFilePatterns": [
+        "/(^|/)Dockerfile$/",
+        "/^docker/install-tools\\.sh$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)( extractVersion=(?<extractVersion>\\S+))?\\n\\S+=\"?\\$\\{\\S+:-(?<currentValue>[^}]+)\\}\"?",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)( extractVersion=(?<extractVersion>\\S+))?\\nARG \\S+=(?<currentValue>\\S+)"
+      ]
+    }
+  ]
+}
